@@ -18,11 +18,14 @@ Changelog v21:
 - Improved real-time sensor reading display
 - Added CalibrationReader thread for continuous sensor monitoring
 - Sensors auto-initialize on app startup for immediate calibration access
-- **New: "Detect Sensors" button** - Re-scan and detect sensors manually
+- **New: "Re-Scan Sensors" button** - Re-scan and detect sensors manually
 - **New: COM port auto-detection** - scan_com_ports() and detect_sensors() functions
 - pyserial integration for COM port scanning (optional dependency)
 - Fixed: Calibration window shows live readings immediately
-- "Detect Sensors" button useful for troubleshooting or re-scanning after hardware changes
+- **CRITICAL FIX: Block size changed from 1 to 100** - Ensures fresh sensor data
+- Adopted proven TransferData() strategy from working MEDAQLib example
+- Improved error logging with detailed messages from GetError(1024)
+- Better data validation and availability checks
 """
 
 # ============================================================================
@@ -144,7 +147,7 @@ SENSORS = 13  # Total number of Micro-Epsilon ILD1320 laser sensors
 COM_PORTS = [f"COM{i}" for i in range(10, 10 + SENSORS)]  # COM10 to COM22
 
 # Sensor sampling configuration
-EXPECTED_BLOCK_SIZE = 1  # Number of values to fetch per sensor per cycle
+EXPECTED_BLOCK_SIZE = 100  # Fetch 100 values per block to ensure recent data (like working example)
 TOF_HZ = 100  # Sensor sampling rate in Hz (Time-of-Flight measurements)
 
 # ---------------------------
@@ -328,8 +331,14 @@ def read_laser_values(sensors):
     """
     Read scaled distance measurements from all Micro-Epsilon ILD1320 laser sensors.
 
-    Polls each sensor for available data and retrieves the latest scaled measurement.
-    Handles sensor errors gracefully by returning NaN for failed readings.
+    Uses proven TransferData() approach to fetch blocks of recent measurements.
+    This ensures we get the most recent sensor reading, not stale buffered data.
+
+    Strategy (based on working MEDAQLib example):
+    1. Check DataAvail() >= EXPECTED_BLOCK_SIZE (100 samples)
+    2. Use TransferData(100) to fetch recent block
+    3. Extract last value from block (most recent reading)
+    4. Verify with GetLastError() after each operation
 
     Args:
         sensors (list): List of MEDAQLib sensor instances (length = SENSORS)
@@ -339,29 +348,49 @@ def read_laser_values(sensors):
               NaN indicates sensor not initialized or read error.
 
     Note:
-        Reads EXPECTED_BLOCK_SIZE samples per sensor per call (configured for 100 Hz).
-        Failed reads are logged as warnings with error details.
+        Block size of 100 ensures we get fresh data from sensor buffer.
+        Failed reads are logged with detailed error messages from GetError(1024).
     """
     values = [float('nan')] * len(sensors)
+
     for i, sensor in enumerate(sensors):
         if sensor is None:
-            logger.warning(f"Sensor {i+1} not initialized")
-            continue
+            continue  # Sensor not initialized
+
         try:
-            # Check if data is available
-            if sensor.DataAvail() >= EXPECTED_BLOCK_SIZE and sensor.GetLastError() == ERR_CODE.ERR_NOERROR:
-                # Fetch one scaled value
+            # Check if sufficient data is available in buffer
+            currently_available = sensor.DataAvail()
+
+            if sensor.GetLastError() == ERR_CODE.ERR_NOERROR and currently_available >= EXPECTED_BLOCK_SIZE:
+                # Fetch block of recent data from MEDAQLib's internal buffer
                 transferred_data = sensor.TransferData(EXPECTED_BLOCK_SIZE)
-                if sensor.GetLastError() == ERR_CODE.ERR_NOERROR and transferred_data[2] > 0:
-                    values[i] = transferred_data[1][-1]  # Latest scaled value
+
+                if sensor.GetLastError() == ERR_CODE.ERR_NOERROR:
+                    # Extract scaled values and count
+                    scaled_data = transferred_data[1]  # Scaled values array
+                    nr_values_transferred = transferred_data[2]  # Number of values
+
+                    if nr_values_transferred > 0:
+                        # Use the last value in block (most recent reading)
+                        values[i] = scaled_data[-1]
+                        logger.debug(f"Sensor S{i+1}: {values[i]:.3f} ({nr_values_transferred} values in block)")
+                    else:
+                        error_msg = sensor.GetError(1024)
+                        logger.warning(f"Sensor S{i+1}: No data transferred - {error_msg}")
                 else:
                     error_msg = sensor.GetError(1024)
-                    logger.warning(f"Sensor {i+1} data error: {error_msg}")
+                    logger.warning(f"Sensor S{i+1}: Transfer error - {error_msg}")
             else:
-                error_msg = sensor.GetError(1024)
-                logger.warning(f"Sensor {i+1} data unavailable: {error_msg}")
+                # Insufficient data or error
+                if sensor.GetLastError() != ERR_CODE.ERR_NOERROR:
+                    error_msg = sensor.GetError(1024)
+                    logger.debug(f"Sensor S{i+1}: Data check error - {error_msg}")
+                else:
+                    logger.debug(f"Sensor S{i+1}: Insufficient data ({currently_available}/{EXPECTED_BLOCK_SIZE})")
+
         except Exception as e:
-            logger.error(f"Sensor {i+1} read failed: {str(e)}")
+            logger.error(f"Sensor S{i+1}: Exception during read - {str(e)}")
+
     return values
 
 def initialize_lasers():

@@ -16,6 +16,9 @@ Changelog v21:
 - COM port display for each sensor
 - Sensor connection checkboxes
 - Improved real-time sensor reading display
+- Added CalibrationReader thread for continuous sensor monitoring
+- Sensors now initialize on app startup for immediate calibration access
+- Fixed: Calibration window now shows live readings before starting a run
 """
 
 # ============================================================================
@@ -839,6 +842,81 @@ class SensorWorker(threading.Thread):
         self.sensors = [None] * SENSORS
 
 # ============================================================================
+# Calibration Reader Thread
+# ============================================================================
+# Lightweight background thread that continuously reads sensors for calibration
+# Runs independently from the main SensorWorker to enable calibration before
+# starting a data collection run
+# ============================================================================
+
+class CalibrationReader(threading.Thread):
+    """
+    Background thread for reading sensors during calibration.
+
+    This thread runs continuously to provide live sensor readings in the
+    calibration window, even when the main data collection is not running.
+
+    Features:
+    - Initializes sensors on startup
+    - Reads all 13 sensors at ~10 Hz (lighter load than main worker)
+    - Updates raw sensor values for calibration display
+    - Runs independently of main SensorWorker
+    """
+    def __init__(self, raw_setter):
+        """
+        Initialize calibration reader thread.
+
+        Args:
+            raw_setter (callable): Function to update latest raw sensor values
+        """
+        super().__init__(daemon=True)
+        self.raw_setter = raw_setter
+        self.stop_event = threading.Event()
+        self.sensors = None
+
+        # Initialize sensors in background thread to avoid blocking UI
+        logger.info("Initializing sensors for calibration...")
+        self.sensors = initialize_lasers()
+
+        # Count successfully initialized sensors
+        connected_count = sum(1 for s in self.sensors if s is not None)
+        logger.info(f"Calibration reader: {connected_count}/{SENSORS} sensors initialized")
+
+    def run(self):
+        """
+        Main calibration reader loop - runs at ~10 Hz.
+
+        Continuously reads sensors and updates raw values for calibration display.
+        """
+        while not self.stop_event.is_set():
+            try:
+                # Read current sensor values
+                raw = read_laser_values(self.sensors)
+
+                # Update main app with latest readings
+                try:
+                    self.raw_setter(raw)
+                except Exception as e:
+                    logger.debug(f"CalibrationReader: raw_setter error: {e}")
+
+                # Sleep to maintain ~10 Hz update rate (lighter than main 100 Hz)
+                time.sleep(0.1)
+
+            except Exception as e:
+                logger.error(f"CalibrationReader error: {e}")
+                time.sleep(1)  # Back off on errors
+
+    def stop(self):
+        """Stop the calibration reader and cleanup sensors."""
+        logger.info("Stopping calibration reader...")
+        self.stop_event.set()
+
+        # Clean up sensors
+        if self.sensors:
+            cleanup_lasers(self.sensors)
+            self.sensors = None
+
+# ============================================================================
 # MAIN APPLICATION CLASS
 # ============================================================================
 # Network Survey Vehicle (NSV) Controller
@@ -914,6 +992,11 @@ class NSVApp(ctk.CTk):
 
         self.selected_sensor_indices = [i for i, v in enumerate(self.sensor_selected) if v.get()]
         self.graph_data = [deque(maxlen=600) for _ in range(SENSORS)]
+
+        # Initialize sensors and start calibration reader for live readings
+        self.calibration_sensors = None
+        self.calibration_reader = None
+        self.start_calibration_reader()
 
         self.build_menu()
         self.build_layout()
@@ -1384,6 +1467,18 @@ class NSVApp(ctk.CTk):
         if not self.controls_enabled or self.project is None:
             messagebox.showwarning("Start", "Set Project Specifications first.")
             return
+
+        # Stop calibration reader before starting main sensor worker
+        # (can't have both reading sensors simultaneously)
+        if self.calibration_reader:
+            logger.info("Stopping calibration reader to start main data collection")
+            try:
+                self.calibration_reader.stop()
+                self.calibration_reader.join(timeout=2.0)
+            except Exception as e:
+                logger.error(f"Error stopping calibration reader: {e}")
+            self.calibration_reader = None
+
         self.running = True
         self.paused_event.clear()
         self.set_status_color("green")
@@ -1418,6 +1513,11 @@ class NSVApp(ctk.CTk):
                 self.sensor_worker.join(timeout=1.0)
             except Exception: pass
             self.sensor_worker = None
+
+        # Restart calibration reader after stopping main data collection
+        logger.info("Restarting calibration reader after stopping run")
+        self.start_calibration_reader()
+
         self.close_writers()
         self.set_selection_state(True)
         if not silent: messagebox.showinfo("Stopped", "Run stopped and data exported.")
@@ -1980,19 +2080,73 @@ class NSVApp(ctk.CTk):
 
     def get_calibration_value(self): return self.calib_values
 
-    # ---------- Misc ----------
+    # ========================================================================
+    # CALIBRATION READER MANAGEMENT
+    # ========================================================================
+
+    def start_calibration_reader(self):
+        """
+        Start the calibration reader thread for live sensor readings.
+
+        This allows the calibration window to show live sensor data even
+        when the main data collection is not running.
+        """
+        if self.calibration_reader is not None:
+            return  # Already running
+
+        try:
+            # Create and start calibration reader
+            self.calibration_reader = CalibrationReader(self.set_latest_raw)
+            self.calibration_reader.start()
+            logger.info("Calibration reader started successfully")
+        except Exception as e:
+            logger.error(f"Failed to start calibration reader: {e}")
+            self.calibration_reader = None
+
+    def set_latest_raw(self, raw_vals):
+        """
+        Update the latest raw sensor values.
+
+        Called by CalibrationReader or SensorWorker to update real-time readings.
+
+        Args:
+            raw_vals (list): List of raw sensor values
+        """
+        self.latest_raw = list(raw_vals)
+
+    # ========================================================================
+    # MISC METHODS
+    # ========================================================================
+
     def new_project(self):
         if messagebox.askyesno("New Project", "This will reset configuration. Continue?"): self.on_reset()
 
     def open_manual(self): messagebox.showinfo("User Manual", "Hook your manual PDF path in open_manual().")
 
     def on_close(self):
+        """Clean up resources and close application."""
         try:
+            # Stop calibration reader
+            if self.calibration_reader:
+                try:
+                    self.calibration_reader.stop()
+                    self.calibration_reader.join(timeout=2.0)
+                except Exception as e:
+                    logger.error(f"Error stopping calibration reader: {e}")
+                self.calibration_reader = None
+
+            # Stop sensor worker
             if self.sensor_worker:
-                try: self.sensor_worker.stop(); self.sensor_worker.join(timeout=1.0)
-                except Exception: pass
+                try:
+                    self.sensor_worker.stop()
+                    self.sensor_worker.join(timeout=1.0)
+                except Exception:
+                    pass
                 self.sensor_worker = None
-            self.close_writers(); self.stop_cameras()
+
+            # Close video writers and cameras
+            self.close_writers()
+            self.stop_cameras()
         finally:
             self.destroy()
 

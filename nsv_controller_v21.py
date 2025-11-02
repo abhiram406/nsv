@@ -13,12 +13,16 @@ Version: 2.1
 Changelog v21:
 - Enhanced calibration window with connection status indicators
 - Visual sensor status (green=connected, red=disconnected)
-- COM port display for each sensor
+- COM port display for each sensor (shows detected ports)
 - Sensor connection checkboxes
 - Improved real-time sensor reading display
 - Added CalibrationReader thread for continuous sensor monitoring
-- Sensors now initialize on app startup for immediate calibration access
+- **New: "Detect Sensors" button** - Automatically scans and detects connected sensors
+- **New: COM port auto-detection** - No need to manually configure COM ports
+- Added scan_com_ports() and detect_sensors() functions for hardware discovery
+- pyserial integration for COM port scanning (optional dependency)
 - Fixed: Calibration window now shows live readings before starting a run
+- Improved: Sensors only initialized when detected, reducing startup errors
 """
 
 # ============================================================================
@@ -51,6 +55,14 @@ from PIL import Image
 
 # Hardware interface
 from MEDAQLib import MEDAQLib, ME_SENSOR, ERR_CODE
+
+# Serial port detection
+try:
+    import serial.tools.list_ports
+    SERIAL_AVAILABLE = True
+except Exception:
+    SERIAL_AVAILABLE = False
+    logger_temp = logging.getLogger(__name__)
 
 # Optional Excel support (required for data export)
 try:
@@ -422,6 +434,109 @@ def cleanup_lasers(sensors):
                 logger.info(f"Sensor {i+1} closed")
             except Exception as e:
                 logger.error(f"Sensor {i+1} cleanup failed: {str(e)}")
+
+# ============================================================================
+# COM Port Detection and Sensor Discovery
+# ============================================================================
+
+def scan_com_ports():
+    """
+    Scan for available COM ports on the system.
+
+    Returns:
+        list: List of available COM port names (e.g., ['COM3', 'COM10', 'COM12'])
+    """
+    available_ports = []
+
+    if not SERIAL_AVAILABLE:
+        logger.warning("pyserial not available - cannot scan COM ports")
+        logger.info("Install with: pip install pyserial")
+        return available_ports
+
+    try:
+        ports = serial.tools.list_ports.comports()
+        available_ports = [port.device for port in ports]
+        logger.info(f"Found {len(available_ports)} COM ports: {available_ports}")
+    except Exception as e:
+        logger.error(f"Error scanning COM ports: {e}")
+
+    return available_ports
+
+def detect_sensors(port_list=None, max_sensors=SENSORS):
+    """
+    Detect connected Micro-Epsilon ILD1320 sensors on specified COM ports.
+
+    Attempts to initialize each sensor and check if it responds. Returns a mapping
+    of sensor indices to COM ports for successfully detected sensors.
+
+    Args:
+        port_list (list): List of COM port names to scan. If None, scans all available ports.
+        max_sensors (int): Maximum number of sensors to detect
+
+    Returns:
+        dict: Dictionary mapping sensor index to (COM_port, sensor_instance)
+              Example: {0: ('COM10', sensor_obj), 1: ('COM12', sensor_obj)}
+    """
+    detected_sensors = {}
+
+    # Get list of ports to scan
+    if port_list is None:
+        port_list = scan_com_ports()
+
+    if not port_list:
+        logger.warning("No COM ports available for sensor detection")
+        return detected_sensors
+
+    logger.info(f"Scanning {len(port_list)} COM ports for sensors...")
+
+    sensor_index = 0
+    for port in port_list:
+        if sensor_index >= max_sensors:
+            break
+
+        try:
+            # Create sensor instance
+            sensor = MEDAQLib.CreateSensorInstance(ME_SENSOR.SENSOR_ILD1320)
+            if sensor.iSensor == 0:
+                logger.debug(f"Port {port}: Failed to create sensor instance")
+                continue
+
+            # Configure RS232 interface
+            sensor.SetParameterString("IP_Interface", "RS232")
+            sensor.SetParameterString("IP_Port", port)
+            sensor.SetParameterInt("IP_AutomaticMode", 3)
+
+            # Try to open sensor
+            sensor.OpenSensor()
+
+            # Check if sensor opened successfully
+            if sensor.GetLastError() == ERR_CODE.ERR_NOERROR:
+                # Verify sensor is responding by trying to read
+                time.sleep(0.1)  # Give sensor time to initialize
+
+                if sensor.DataAvail() >= 0:
+                    detected_sensors[sensor_index] = (port, sensor)
+                    logger.info(f"✓ Sensor S{sensor_index+1} detected on {port}")
+                    sensor_index += 1
+                else:
+                    # Sensor opened but not responding
+                    error_msg = sensor.GetError(1024)
+                    logger.debug(f"Port {port}: Sensor not responding - {error_msg}")
+                    sensor.CloseSensor()
+                    sensor.ReleaseSensorInstance()
+            else:
+                # Failed to open
+                error_msg = sensor.GetError(1024)
+                logger.debug(f"Port {port}: Failed to open - {error_msg}")
+                sensor.CloseSensor()
+                sensor.ReleaseSensorInstance()
+
+        except Exception as e:
+            logger.debug(f"Port {port}: Detection error - {str(e)}")
+            continue
+
+    logger.info(f"Detection complete: {len(detected_sensors)} sensor(s) found")
+    return detected_sensors
 
 # ============================================================================
 # Camera Worker Thread
@@ -857,30 +972,55 @@ class CalibrationReader(threading.Thread):
     calibration window, even when the main data collection is not running.
 
     Features:
-    - Initializes sensors on startup
+    - Waits for sensors to be detected before reading
     - Reads all 13 sensors at ~10 Hz (lighter load than main worker)
     - Updates raw sensor values for calibration display
     - Runs independently of main SensorWorker
     """
-    def __init__(self, raw_setter):
+    def __init__(self, raw_setter, port_map_getter):
         """
         Initialize calibration reader thread.
 
         Args:
             raw_setter (callable): Function to update latest raw sensor values
+            port_map_getter (callable): Function to get detected sensor port mapping
         """
         super().__init__(daemon=True)
         self.raw_setter = raw_setter
+        self.port_map_getter = port_map_getter
         self.stop_event = threading.Event()
-        self.sensors = None
+        self.sensors = [None] * SENSORS
+        self.sensor_port_map = {}  # Maps sensor index to COM port
 
-        # Initialize sensors in background thread to avoid blocking UI
-        logger.info("Initializing sensors for calibration...")
-        self.sensors = initialize_lasers()
+    def update_sensors(self, detected_sensors_dict):
+        """
+        Update sensor instances from detection results.
 
-        # Count successfully initialized sensors
+        Args:
+            detected_sensors_dict: Dict mapping sensor index to (port, sensor_instance)
+        """
+        # Clean up old sensors
+        if self.sensors:
+            for sensor in self.sensors:
+                if sensor is not None:
+                    try:
+                        sensor.CloseSensor()
+                        sensor.ReleaseSensorInstance()
+                    except:
+                        pass
+
+        # Initialize new sensor list
+        self.sensors = [None] * SENSORS
+        self.sensor_port_map = {}
+
+        # Populate with detected sensors
+        for idx, (port, sensor_obj) in detected_sensors_dict.items():
+            if idx < SENSORS:
+                self.sensors[idx] = sensor_obj
+                self.sensor_port_map[idx] = port
+
         connected_count = sum(1 for s in self.sensors if s is not None)
-        logger.info(f"Calibration reader: {connected_count}/{SENSORS} sensors initialized")
+        logger.info(f"CalibrationReader: {connected_count} sensor(s) active")
 
     def run(self):
         """
@@ -993,8 +1133,9 @@ class NSVApp(ctk.CTk):
         self.selected_sensor_indices = [i for i, v in enumerate(self.sensor_selected) if v.get()]
         self.graph_data = [deque(maxlen=600) for _ in range(SENSORS)]
 
-        # Initialize sensors and start calibration reader for live readings
-        self.calibration_sensors = None
+        # Sensor detection and calibration
+        self.detected_sensors = {}  # Maps sensor index to (COM_port, sensor_instance)
+        self.detected_ports = {}    # Maps sensor index to COM_port string
         self.calibration_reader = None
         self.start_calibration_reader()
 
@@ -1940,6 +2081,7 @@ class NSVApp(ctk.CTk):
 
         # Sensor rows - store UI elements for updates
         self.cal_status_indicators = []
+        self.cal_com_port_labels = []
         self.cal_raw_labels = []
         self.cal_calibrated_labels = []
         self.sensor_connected_vars = []
@@ -1968,13 +2110,15 @@ class NSVApp(ctk.CTk):
                 width=widths[1]
             ).grid(row=0, column=1, padx=5, pady=5)
 
-            # Column 2: COM Port
-            ctk.CTkLabel(
+            # Column 2: COM Port (will be updated after detection)
+            port_label = ctk.CTkLabel(
                 row_frame,
-                text=COM_PORTS[i],
+                text="--",  # Initially unknown until detection
                 font=ctk.CTkFont(size=11),
                 width=widths[2]
-            ).grid(row=0, column=2, padx=5, pady=5)
+            )
+            port_label.grid(row=0, column=2, padx=5, pady=5)
+            self.cal_com_port_labels.append(port_label)
 
             # Column 3: Live RAW reading
             raw_label = ctk.CTkLabel(
@@ -2041,6 +2185,41 @@ class NSVApp(ctk.CTk):
         button_frame = ctk.CTkFrame(win)
         button_frame.pack(fill="x", padx=10, pady=10)
 
+        def detect_sensors_clicked():
+            """Scan for and detect connected sensors."""
+            # Show detection in progress
+            detect_btn.configure(text="Detecting...", state="disabled")
+            win.update()
+
+            # Run detection
+            count = self.detect_and_update_sensors()
+
+            # Update COM port labels with detected ports
+            for i in range(SENSORS):
+                if i in self.detected_ports:
+                    self.cal_com_port_labels[i].configure(text=self.detected_ports[i])
+                else:
+                    self.cal_com_port_labels[i].configure(text="--")
+
+            # Show results
+            detect_btn.configure(text=f"Detect Sensors ({count} found)", state="normal")
+
+            if count > 0:
+                messagebox.showinfo(
+                    "Sensor Detection Complete",
+                    f"Successfully detected {count} sensor(s).\n\n"
+                    f"Detected sensors will show green status when readings are received."
+                )
+            else:
+                messagebox.showwarning(
+                    "No Sensors Detected",
+                    "No sensors were detected.\n\n"
+                    "Please check:\n"
+                    "- Sensors are powered on\n"
+                    "- USB/Serial connections are secure\n"
+                    "- COM port drivers are installed"
+                )
+
         def capture_offsets():
             """Capture current sensor readings as calibration offsets."""
             self.calib_values = [
@@ -2062,6 +2241,18 @@ class NSVApp(ctk.CTk):
             win.destroy()
             self.rebuild_graphs()
 
+        # Detect Sensors button (primary action)
+        detect_btn = ctk.CTkButton(
+            button_frame,
+            text="Detect Sensors",
+            command=detect_sensors_clicked,
+            height=35,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            fg_color="#2196F3"  # Blue to stand out
+        )
+        detect_btn.pack(side="left", padx=5, expand=True, fill="x")
+
+        # Capture Calibration button
         ctk.CTkButton(
             button_frame,
             text="Capture Calibration Offsets",
@@ -2070,6 +2261,7 @@ class NSVApp(ctk.CTk):
             font=ctk.CTkFont(size=13)
         ).pack(side="left", padx=5, expand=True, fill="x")
 
+        # Apply & Close button
         ctk.CTkButton(
             button_frame,
             text="Apply & Close",
@@ -2096,12 +2288,42 @@ class NSVApp(ctk.CTk):
 
         try:
             # Create and start calibration reader
-            self.calibration_reader = CalibrationReader(self.set_latest_raw)
+            self.calibration_reader = CalibrationReader(
+                self.set_latest_raw,
+                lambda: self.detected_ports
+            )
             self.calibration_reader.start()
             logger.info("Calibration reader started successfully")
         except Exception as e:
             logger.error(f"Failed to start calibration reader: {e}")
             self.calibration_reader = None
+
+    def detect_and_update_sensors(self):
+        """
+        Scan for connected sensors and update calibration reader.
+
+        Returns:
+            int: Number of sensors detected
+        """
+        try:
+            # Run sensor detection
+            logger.info("Starting sensor detection...")
+            detected = detect_sensors()
+
+            # Update detected sensor mappings
+            self.detected_sensors = detected
+            self.detected_ports = {idx: port for idx, (port, _) in detected.items()}
+
+            # Update calibration reader with detected sensors
+            if self.calibration_reader:
+                self.calibration_reader.update_sensors(detected)
+
+            logger.info(f"Detected {len(detected)} sensor(s)")
+            return len(detected)
+
+        except Exception as e:
+            logger.error(f"Sensor detection failed: {e}")
+            return 0
 
     def set_latest_raw(self, raw_vals):
         """

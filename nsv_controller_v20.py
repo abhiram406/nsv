@@ -1,17 +1,48 @@
-import os, time, math, threading, queue, random
-from datetime import datetime
-import logging
+"""
+NSV Controller v20 - Network Survey Vehicle Data Collection System
 
+Main application for highway road condition surveying using:
+- Multi-camera video recording (4 RTSP cameras)
+- Laser distance sensors (13x Micro-Epsilon ILD1320)
+- GPS tracking and chainage calculation
+- Real-time data visualization and Excel export
+
+Author: Road Survey Team
+Version: 2.0
+"""
+
+# ============================================================================
+# IMPORTS
+# ============================================================================
+
+# Standard library imports
+import os
+import time
+import math
+import threading
+import queue
+import random
+import logging
+from datetime import datetime
+from collections import deque
+from math import radians, sin, cos, sqrt, atan2
+
+# GUI framework
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
+# Data processing and visualization
 import numpy as np
 import cv2
-from collections import deque
-from MEDAQLib import MEDAQLib, ME_SENSOR, ERR_CODE  # Assuming the provided library is saved as medaqlib.py
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+from PIL import Image
 
-# Optional Excel support
+# Hardware interface
+from MEDAQLib import MEDAQLib, ME_SENSOR, ERR_CODE
+
+# Optional Excel support (required for data export)
 try:
     import pandas as pd
     PANDAS_OK = True
@@ -24,67 +55,117 @@ try:
 except Exception:
     OPENPYXL_OK = False
 
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.figure import Figure
-
-from PIL import Image
-
-from math import radians, sin, cos, sqrt, atan2
-
-# ---------------------------
-# Logging Setup
-# ---------------------------
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# ============================================================================
+# LOGGING CONFIGURATION
+# ============================================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# ---------------------------
-# Layout / Runtime constants
-# ---------------------------
-LEFT_WIDTH = 300
-WINDOW_GEOM = "1680x960"
+# ============================================================================
+# APPLICATION CONFIGURATION CONSTANTS
+# ============================================================================
 
-CAM_IDS = [0, 1, 2, 3]
-CAM_NAMES = {0: "Front", 1: "Left", 2: "Right", 3: "Back"}
+# UI Layout
+LEFT_WIDTH = 300              # Width of left control panel in pixels
+WINDOW_GEOM = "1680x960"      # Default window size
+
+# Camera configuration
+CAM_IDS = [0, 1, 2, 3]        # Camera identifiers
+CAM_NAMES = {0: "Front", 1: "Left", 2: "Right", 3: "Back"}  # Camera position names
+
+# RTSP camera URLs
+# TODO: Update with your actual camera IP addresses and credentials
 CAM_URLS = [
-    "rtsp://192.168.1.103:554/stream1",  # Front - replace with actual URL
-    "rtsp://192.168.1.102:554/stream1",  # Left - replace with actual URL
-    "rtsp://192.168.1.100:554/stream1",  # Right - replace with actual URL
-    "rtsp://192.168.1.101:554/stream0?username=admin&password=E10ADC3949BA59ABBE56E057F20F883E"   # Back - replace with actual URL
+    "rtsp://192.168.1.103:554/stream1",  # Front camera
+    "rtsp://192.168.1.102:554/stream1",  # Left camera
+    "rtsp://192.168.1.100:554/stream1",  # Right camera
+    "rtsp://192.168.1.101:554/stream0?username=admin&password=E10ADC3949BA59ABBE56E057F20F883E"  # Back camera
+    # WARNING: Credentials in plaintext - consider using environment variables
 ]
-PREVIEW_RES = (360, 202)     # (w,h) fast UI
-RECORD_RES  = (1280, 720)    # (w,h) saved video/images
-CAM_FPS     = 25
-PREVIEW_FPS = 15             # Lower FPS for preview to reduce load
-TOF_HZ      = 100
-BIN_SIZE_METERS = 10.0
-BIN_SIZE_KM = 0.01
-NEON_GREEN  = "#39ff14"
-HEADER_COLOR= (255, 0, 0)    # BGR: blue
-TEXT_COLOR  = (255, 255, 255)
-FONT        = cv2.FONT_HERSHEY_SIMPLEX
-BG_COLOR    = "#0b0f14"
-GRID_COLOR  = "#263238"
-SPINE_COLOR = "#607d8b"
-HEADER_MAX_FRAC = 0.20       # Header height 20% of frame
-HEADER_LINES = 5             # Lines per column (max for Col2)
-LOGO_PATH = "cropped-Roadworks-LogoR-768x576-1.jpeg"       # Path to your logo image
-MAX_QUEUE_SIZE = 5           # Limit queue to prevent backlog
+# Camera resolution and frame rate settings
+PREVIEW_RES = (360, 202)     # Preview resolution (w,h) for UI display
+RECORD_RES  = (1280, 720)    # Recording resolution (w,h) for saved video/images
+CAM_FPS     = 25              # Camera capture frame rate
+PREVIEW_FPS = 15              # Preview display FPS (lower to reduce UI load)
 
-# Constants for laser sensors
-SENSORS = 13
-#COM_PORTS = [f"COM{i}" for i in range(10, 10 + SENSORS)]  # COM10 to COM22
-COM_PORTS = [f"COM{i}" for i in [13,12,7,13,10,12,10,10,10,10,10,10,10]]
-EXPECTED_BLOCK_SIZE = 1  # Fetch one value per sensor per cycle for 100 Hz
-TOF_HZ = 100
+# Data binning configuration
+BIN_SIZE_METERS = 10.0        # Distance bin size in meters (10m segments)
+BIN_SIZE_KM = 0.01            # Distance bin size in kilometers (0.01 km = 10m)
+# Visual styling constants
+NEON_GREEN   = "#39ff14"          # Color for graph lines
+HEADER_COLOR = (255, 0, 0)        # BGR format: blue header background
+TEXT_COLOR   = (255, 255, 255)    # White text for overlays
+FONT         = cv2.FONT_HERSHEY_SIMPLEX  # OpenCV font for text rendering
+BG_COLOR     = "#0b0f14"          # Dark background for graphs
+GRID_COLOR   = "#263238"          # Grid line color for graphs
+SPINE_COLOR  = "#607d8b"          # Graph axis spine color
+
+# Video overlay configuration
+HEADER_MAX_FRAC = 0.20            # Maximum header height as fraction of frame (20%)
+HEADER_LINES = 5                  # Maximum lines per column in header
+
+# Application resources
+LOGO_PATH = "cropped-Roadworks-LogoR-768x576-1.jpeg"  # Splash screen logo
+MAX_QUEUE_SIZE = 5                # Frame queue size limit (prevents memory overflow)
+
+# ---------------------------
+# Laser Sensor Configuration
+# ---------------------------
+SENSORS = 13  # Total number of Micro-Epsilon ILD1320 laser sensors
+
+# COM port assignments for each sensor
+# TODO: Configure actual COM ports for your hardware setup
+# Note: Ensure no duplicate ports - each sensor needs a unique COM port
+COM_PORTS = [f"COM{i}" for i in range(10, 10 + SENSORS)]  # COM10 to COM22
+
+# Sensor sampling configuration
+EXPECTED_BLOCK_SIZE = 1  # Number of values to fetch per sensor per cycle
+TOF_HZ = 100  # Sensor sampling rate in Hz (Time-of-Flight measurements)
+
+# ---------------------------
+# Sensor Position Mapping
+# ---------------------------
+# Physical layout of sensors across the vehicle width (left to right)
+# Used for calculating road condition metrics:
+#   - Sensors S1, S2: Left wheel path (rutting measurement)
+#   - Sensors S3, S4: Center sensors (IRI/roughness measurement)
+#   - Sensors S5, S6: Right wheel path (rutting measurement)
+#   - Sensors S7-S13: Additional texture/profile measurements (if configured)
+#
+# Metric Calculation:
+#   Left Rut:   Average of S1, S2
+#   Right Rut:  Average of S5, S6
+#   Left IRI:   S3 (left roughness track)
+#   Right IRI:  S4 (right roughness track)
+#   Texture:    Average of all selected sensors
 
 
 # ---------------------------
-# Helpers
+# Helper Functions
 # ---------------------------
-now_local_str = lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-ts_for_path   = lambda: datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+
+# Timestamp formatters for logging and file naming
+now_local_str = lambda: datetime.now().strftime("%Y-%m-%d %H:%M:%S")  # Human-readable timestamp
+ts_for_path   = lambda: datetime.now().strftime("%Y-%m-%d_%H-%M-%S")  # Filesystem-safe timestamp
 
 def make_testcard(w, h, text="NO CAMERA"):
+    """
+    Generate a color bar test pattern with overlay text.
+
+    Used as a fallback image when camera feed is unavailable or fails.
+    Creates SMPTE-style color bars with centered error message.
+
+    Args:
+        w (int): Width of the test card in pixels
+        h (int): Height of the test card in pixels
+        text (str): Error message to display on the test card
+
+    Returns:
+        numpy.ndarray: BGR image array of shape (h, w, 3)
+    """
     img = np.zeros((h, w, 3), dtype=np.uint8)
     bars = [(255,255,255),(255,255,0),(0,255,255),(0,255,0),(255,0,255),(255,0,0),(0,0,255)]
     bw = max(1, w // len(bars))
@@ -95,7 +176,24 @@ def make_testcard(w, h, text="NO CAMERA"):
     return img
 
 def draw_header_to_size(frame, ctx, size):
-    """Compose header at target size (w,h) with updated columns and smaller font."""
+    """
+    Overlay telemetry header onto video frame with project and GPS information.
+
+    Creates a blue header bar at the top of the frame containing three columns:
+    - Left: Project metadata (ID, location, highway numbers, section, direction)
+    - Center: GPS data (lat/lon/alt, distance, chainage, speed, LRP)
+    - Right: Timestamp (date and time)
+
+    Args:
+        frame: Input image (numpy BGR array or PIL Image). Can be None for blank frame.
+        ctx (dict): Context dictionary with telemetry values. Expected keys:
+            'survey', 'survey_location', 'nh', 'oldnh', 'section_code', 'direction',
+            'lat', 'lon', 'alt', 'distance', 'chainage', 'speed', 'lrp', 'date', 'time'
+        size (tuple): Target (width, height) in pixels for the output frame
+
+    Returns:
+        numpy.ndarray: BGR frame with header overlay at specified size
+    """
     w, h = size
 
     # Ensure `frame` is a numpy BGR image of shape (H,W,3)
@@ -177,7 +275,26 @@ def draw_header_to_size(frame, ctx, size):
     return frame
 
 def haversine(lat1, lon1, lat2, lon2):
-    R = 6371e3  # meters
+    """
+    Calculate the great-circle distance between two GPS coordinates.
+
+    Uses the Haversine formula to compute the shortest distance over the earth's
+    surface between two points specified by latitude and longitude.
+
+    Args:
+        lat1 (float): Latitude of first point in decimal degrees
+        lon1 (float): Longitude of first point in decimal degrees
+        lat2 (float): Latitude of second point in decimal degrees
+        lon2 (float): Longitude of second point in decimal degrees
+
+    Returns:
+        float: Distance between the two points in meters
+
+    Note:
+        Assumes Earth is a perfect sphere with radius 6,371 km.
+        Accuracy degrades for very short distances (<1m) or antipodal points.
+    """
+    R = 6371e3  # Earth radius in meters
     dlat = radians(lat2 - lat1)
     dlon = radians(lon2 - lon1)
     a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
@@ -186,7 +303,23 @@ def haversine(lat1, lon1, lat2, lon2):
 
 
 def read_laser_values(sensors):
-    """Read scaled values from Micro-Epsilon ILD1320 lasers."""
+    """
+    Read scaled distance measurements from all Micro-Epsilon ILD1320 laser sensors.
+
+    Polls each sensor for available data and retrieves the latest scaled measurement.
+    Handles sensor errors gracefully by returning NaN for failed readings.
+
+    Args:
+        sensors (list): List of MEDAQLib sensor instances (length = SENSORS)
+
+    Returns:
+        list: Scaled distance values (floats) from each sensor.
+              NaN indicates sensor not initialized or read error.
+
+    Note:
+        Reads EXPECTED_BLOCK_SIZE samples per sensor per call (configured for 100 Hz).
+        Failed reads are logged as warnings with error details.
+    """
     values = [float('nan')] * len(sensors)
     for i, sensor in enumerate(sensors):
         if sensor is None:
@@ -210,7 +343,25 @@ def read_laser_values(sensors):
     return values
 
 def initialize_lasers():
-    """Initialize up to 13 ILD1320 sensors on specified COM ports."""
+    """
+    Initialize all Micro-Epsilon ILD1320 laser sensors on configured COM ports.
+
+    Creates sensor instances, configures RS232 communication parameters,
+    opens connections, and enables logging for each sensor.
+
+    Returns:
+        list: Sensor instances (MEDAQLib objects). None entries indicate failed initialization.
+
+    Side Effects:
+        - Creates log files: MEDAQLib-log-S1.txt through MEDAQLib-log-S13.txt
+        - Logs initialization status (success/failure) for each sensor
+
+    Configuration:
+        - Interface: RS232 serial communication
+        - COM ports: Defined in COM_PORTS constant
+        - Automatic mode: Enabled (parameter value = 3)
+        - Logging: Enabled for diagnostics
+    """
     sensors = [None] * SENSORS
     for i in range(SENSORS):
         try:
@@ -239,7 +390,20 @@ def initialize_lasers():
     return sensors
 
 def cleanup_lasers(sensors):
-    """Close and release all laser sensor instances."""
+    """
+    Safely close and release all laser sensor connections.
+
+    Called during shutdown to properly close COM ports and free sensor resources.
+    Handles errors gracefully to ensure all sensors are cleaned up even if some fail.
+
+    Args:
+        sensors (list): List of MEDAQLib sensor instances to clean up
+
+    Side Effects:
+        - Closes RS232 connections for all sensors
+        - Releases MEDAQLib resources
+        - Logs cleanup status for each sensor
+    """
     for i, sensor in enumerate(sensors):
         if sensor is not None:
             try:
@@ -249,12 +413,46 @@ def cleanup_lasers(sensors):
             except Exception as e:
                 logger.error(f"Sensor {i+1} cleanup failed: {str(e)}")
 
-# ---------------------------
-# Camera Worker
-# ---------------------------
+# ============================================================================
+# Camera Worker Thread
+# ============================================================================
+# Handles real-time camera capture, frame processing, and video recording
+# Each camera runs in its own thread for parallel processing
+# ============================================================================
+
 class CameraWorker(threading.Thread):
+    """
+    Background thread for capturing, processing, and recording video from one camera.
+
+    Manages dual-stream processing:
+    - Preview stream: Lower resolution (360x202) at 15 FPS for UI display
+    - Record stream: Full resolution (1280x720) at 25 FPS with telemetry overlay
+
+    Features:
+    - Automatic reconnection on camera failures
+    - Low-latency RTSP configuration
+    - Frame rate limiting to prevent queue overflow
+    - Telemetry overlay on recorded frames
+
+    Attributes:
+        cam_id (int): Camera identifier (0-3)
+        cam_url (str): RTSP URL for the camera
+        latest_preview_frame: Most recent preview frame (RGB)
+        latest_record_frame: Most recent full-res frame with overlay (BGR)
+    """
     def __init__(self, cam_id, out_queue, get_writer, get_overlay_ctx,
                  preview_size=PREVIEW_RES, record_size=RECORD_RES):
+        """
+        Initialize camera worker thread.
+
+        Args:
+            cam_id (int): Camera index (0-3)
+            out_queue (queue.Queue): Queue for preview frames to UI
+            get_writer (callable): Function to get video writer for this camera
+            get_overlay_ctx (callable): Function to get telemetry context for overlay
+            preview_size (tuple): (width, height) for preview frames
+            record_size (tuple): (width, height) for recorded frames
+        """
         super().__init__(daemon=True)
         self.cam_id = cam_id
         self.cam_url = CAM_URLS[cam_id]
@@ -293,46 +491,92 @@ class CameraWorker(threading.Thread):
         return False
 
     def run(self):
+        """
+        Main camera capture loop.
+
+        Process flow:
+        1. Capture frame from RTSP stream
+        2. Create dual streams (preview + record)
+        3. Add telemetry overlay to record stream
+        4. Send preview to UI queue (rate-limited)
+        5. Write record stream to video file
+        6. Maintain target frame rate
+        """
+        # Initial camera connection
         if not self._open_cap():
             logger.error(f"Camera {self.cam_id} initial open failed")
+
         while not self.stop_event.is_set():
+            # Retry connection if camera was lost
             if self.cap is None:
                 time.sleep(1)
                 self._open_cap()
                 continue
+
             start_time = time.time()
+
+            # Capture frame from camera
             ok, frame = self.cap.read()
+
+            # Handle capture failures
             if not ok or frame is None or frame.size == 0:
                 self.consecutive_fails += 1
                 logger.warning(f"Camera {self.cam_id} read failed ({self.consecutive_fails})")
+
+                # After 5 consecutive failures, show permanent error testcard
                 if self.consecutive_fails > 5:
-                    frame = make_testcard(self.record_size[0], self.record_size[1], f"{CAM_NAMES.get(self.cam_id, f'CAM {self.cam_id}')} PERMANENT ERROR")
+                    frame = make_testcard(
+                        self.record_size[0], self.record_size[1],
+                        f"{CAM_NAMES.get(self.cam_id, f'CAM {self.cam_id}')} PERMANENT ERROR"
+                    )
                 else:
+                    # Release and retry connection
                     self.cap.release()
                     self.cap = None
                     time.sleep(0.5)
                     continue
             else:
+                # Reset failure counter on successful read
                 self.consecutive_fails = 0
+
+            # Get current telemetry for overlay
             ctx = self.get_overlay_ctx()
+
+            # Create dual-stream processing:
+            # 1. Preview: Low-res for UI (360x202)
             preview = cv2.resize(frame, self.preview_size)
+
+            # 2. Record: Full-res with telemetry header overlay (1280x720)
             record = draw_header_to_size(frame, ctx, self.record_size)
+
+            # Convert preview to RGB for tkinter display
             preview_rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
+
+            # Store latest frames for image capture (thread-safe access)
             self.latest_preview_frame = preview_rgb
             self.latest_record_frame = record
             self.latest_frame_ts = time.time()
+
+            # Send preview to UI queue (rate-limited to PREVIEW_FPS)
             if start_time - self.last_frame_time >= self.frame_interval:
                 if self.out_queue.qsize() < MAX_QUEUE_SIZE:
                     self.out_queue.put((self.cam_id, preview_rgb))
                     self.last_frame_time = start_time
                 else:
+                    # Drop frame if queue is full (prevents memory overflow)
                     logger.warning(f"Camera {self.cam_id} queue full, dropping frame")
+
+            # Write full-res frame to video file (if recording is active)
             writer = self.get_writer(self.cam_id)
             if writer is not None:
                 writer.write(record)
+
+            # Sleep to maintain target frame rate (CAM_FPS = 25)
             elapsed = time.time() - start_time
             sleep_time = max(0, 1.0 / CAM_FPS - elapsed)
             time.sleep(sleep_time)
+
+        # Cleanup on thread exit
         if self.cap is not None:
             self.cap.release()
             logger.info(f"Camera {self.cam_id} released")
@@ -340,40 +584,124 @@ class CameraWorker(threading.Thread):
     def stop(self):
         self.stop_event.set()
 
-# ---------------------------
-# Simulated Inputs (replace with real drivers)
-# ---------------------------
-sim_lat = 17.385
-sim_lon = 78.486
-sim_t = time.time()
+# ============================================================================
+# SIMULATED INPUT FUNCTIONS - FOR TESTING ONLY
+# ============================================================================
+# TODO: CRITICAL - Replace these functions with real GPS hardware driver
+# Current implementation uses simulated data for development/testing purposes
+# Required: Integrate actual GPS module (e.g., NMEA parser for serial GPS)
+# ============================================================================
+
+# Simulated GPS starting position (Hyderabad coordinates)
+sim_lat = 17.385  # Latitude in decimal degrees
+sim_lon = 78.486  # Longitude in decimal degrees
+sim_t = time.time()  # Track time for simulation
 
 def sim_speed_kmph(t):
+    """
+    Simulate vehicle speed with sinusoidal variation.
+
+    Args:
+        t: Current timestamp
+
+    Returns:
+        float: Simulated speed in km/h (base 45 km/h with ±10 km/h variation)
+
+    TODO: Remove when real speed sensor is integrated
+    """
     return max(0.0, 45 + 10*math.sin(2*math.pi*t/20.0) + random.uniform(-3,3))
 
 def sim_gps():
+    """
+    Simulate GPS coordinates based on simulated speed and movement.
+
+    Returns:
+        tuple: (latitude, longitude, altitude) in decimal degrees and meters
+
+    TODO: REPLACE WITH REAL GPS DRIVER
+    Required implementation:
+    - Read from GPS hardware (serial/USB)
+    - Parse NMEA sentences (GGA, RMC)
+    - Return actual lat/lon/alt values
+    """
     global sim_lat, sim_lon, sim_t
+
     t = time.time()
     dt = t - sim_t
     sim_t = t
+
+    # Calculate simulated movement
     speed_kmph = sim_speed_kmph(t)
-    speed_mps = speed_kmph / 3.6
-    delta_m = speed_mps * dt
-    dir_s = 1 if math.sin(t/30) > 0 else -1  # simulate occasional reversals
-    delta_lat = (delta_m * dir_s) / 111120  # approximate meters to degrees
+    speed_mps = speed_kmph / 3.6  # Convert km/h to m/s
+    delta_m = speed_mps * dt  # Distance traveled in meters
+
+    # Simulate occasional direction reversals
+    dir_s = 1 if math.sin(t/30) > 0 else -1
+
+    # Convert meters to degrees (approximate: 1 degree lat ≈ 111.12 km)
+    delta_lat = (delta_m * dir_s) / 111120
+
+    # Add movement and random noise
     sim_lat += delta_lat
-    sim_lat += random.uniform(-1e-6, 1e-6)
-    sim_lon += random.uniform(-1e-6, 1e-6)
+    sim_lat += random.uniform(-1e-6, 1e-6)  # GPS jitter
+    sim_lon += random.uniform(-1e-6, 1e-6)  # GPS jitter
+
+    # Simulate altitude with small variations
     alt = 505 + random.uniform(-1, 1)
+
     return sim_lat, sim_lon, alt
 
 def sim_tof_values():
+    """
+    Simulate Time-of-Flight sensor readings (for testing without hardware).
+
+    Returns:
+        list: 13 simulated sensor values centered around 800 with Gaussian noise
+
+    TODO: Remove when using real laser sensors (read_laser_values already implemented)
+    """
     return [800 + random.gauss(0, 4) for _ in range(SENSORS)]
 
-# ---------------------------
-# Sensor Worker
-# ---------------------------
+# ============================================================================
+# Sensor Worker Thread
+# ============================================================================
+# Manages laser sensor data acquisition, GPS tracking, and distance binning
+# Runs at 100 Hz for high-frequency road surface profiling
+# ============================================================================
+
 class SensorWorker(threading.Thread):
+    """
+    Background thread for sensor data acquisition and processing.
+
+    Coordinates multiple data sources:
+    - 13 laser sensors reading at 100 Hz
+    - GPS position and speed (currently simulated - TODO: integrate real GPS)
+    - Distance-based data binning (10-meter segments)
+
+    Responsibilities:
+    - Read and calibrate laser sensor values
+    - Track vehicle position and calculate speed from GPS
+    - Accumulate sensor data into 10-meter bins
+    - Trigger callbacks when bins complete
+    - Update UI with real-time telemetry
+
+    Attributes:
+        distance_m (float): Total distance traveled in current run
+        bin_buffers (list): Accumulated sensor readings for current 10m bin
+        sensors (list): Initialized laser sensor instances
+    """
     def __init__(self, ui_queue, paused_event, calib_getter, ten_m_callback, sensor_selected_getter, raw_setter):
+        """
+        Initialize sensor worker thread.
+
+        Args:
+            ui_queue (queue.Queue): Queue for sending telemetry updates to UI
+            paused_event (threading.Event): Event to pause data collection
+            calib_getter (callable): Returns calibration offsets for sensors
+            ten_m_callback (callable): Called when 10-meter bin completes
+            sensor_selected_getter (callable): Returns list of enabled sensors
+            raw_setter (callable): Updates latest raw sensor values in UI
+        """
         super().__init__(daemon=True)
         self.ui_queue = ui_queue
         self.paused_event = paused_event
@@ -400,37 +728,65 @@ class SensorWorker(threading.Thread):
         self.bin_start_lon = None
 
     def run(self):
+        """
+        Main sensor worker loop - runs at 100 Hz.
+
+        Process flow:
+        1. Read GPS and laser sensors
+        2. Apply calibration offsets
+        3. Accumulate data in 10-meter bins
+        4. Calculate speed from GPS movement
+        5. Trigger callbacks when bins complete
+        """
         while not self.stop_event.is_set():
             t = time.time()
+
+            # Skip processing if paused, but maintain timing
             if self.paused_event.is_set():
                 self.prev_t = t
                 time.sleep(0.01)
                 continue
 
-            lat, lon, alt = sim_gps()  # Replace with real GPS in production
-            raw = read_laser_values(self.sensors)  # Read from lasers
-            try: self.raw_setter(raw)
-            except Exception: pass
+            # Acquire sensor data
+            lat, lon, alt = sim_gps()  # TODO: Replace with real GPS driver
+            raw = read_laser_values(self.sensors)  # Read all 13 laser sensors
 
+            # Update UI with raw values (for calibration window)
+            try:
+                self.raw_setter(raw)
+            except Exception:
+                pass  # UI may not be ready yet
+
+            # Apply calibration offsets to get calibrated values
             calib_vals = self.calib_getter()
             vals = [raw[i] - calib_vals[i] if np.isfinite(raw[i]) else float('nan') for i in range(SENSORS)]
+
+            # Accumulate sensor readings in current bin
             for i, v in enumerate(vals):
                 self.bin_buffers[i].append(v)
 
+            # Track bin start position (GPS coordinates at bin start)
             if self.bin_start_lat is None:
                 self.bin_start_lat = lat
                 self.bin_start_lon = lon
 
+            # Calculate speed from GPS movement (only after second reading)
             if self.prev_lat is not None:
+                # Compute distance traveled since last reading using Haversine
                 dist_delta = haversine(self.prev_lat, self.prev_lon, lat, lon)
                 dt = t - self.prev_t
                 speed_mps = dist_delta / dt if dt > 0 else 0.0
+
+                # Update cumulative distance and speed (convert m/s to km/h)
                 self.distance_m += dist_delta
                 self.last_speed = speed_mps * 3.6
+
+            # Store current position for next iteration
             self.prev_lat = lat
             self.prev_lon = lon
             self.prev_t = t
 
+            # Send real-time telemetry to UI
             self.ui_queue.put({
                 "type": "telemetry",
                 "speed_kmph": self.last_speed,
@@ -438,11 +794,19 @@ class SensorWorker(threading.Thread):
                 "lat": lat, "lon": lon, "alt": alt,
             })
 
+            # Check if we've completed a 10-meter bin
             if self.distance_m >= self.next_ten_m_edge:
+                # Calculate average sensor values for this bin
                 avgs = [float(np.nanmean(buf)) if len(buf) else float("nan") for buf in self.bin_buffers]
+
+                # Reset buffers for next bin
                 self.bin_buffers = [[] for _ in range(SENSORS)]
+
+                # Store bin start coordinates
                 start_lat = self.bin_start_lat
                 start_lon = self.bin_start_lon
+
+                # Notify UI and main app of completed bin
                 self.ui_queue.put({
                     "type": "ten_m",
                     "avg_s": avgs,
@@ -450,11 +814,16 @@ class SensorWorker(threading.Thread):
                     "lat": lat, "lon": lon, "alt": alt,
                     "start_lat": start_lat, "start_lon": start_lon
                 })
+
+                # Trigger data processing callback
                 self.ten_m_callback(avgs, self.last_speed, (lat, lon, alt), (start_lat, start_lon, alt))
+
+                # Set next bin edge and update start position
                 self.next_ten_m_edge += 10.0
                 self.bin_start_lat = lat
                 self.bin_start_lon = lon
 
+            # Sleep to maintain 100 Hz sampling rate
             time.sleep(max(0.0, 1.0/TOF_HZ - (time.time()-t)))
 
     def stop(self):
@@ -462,11 +831,42 @@ class SensorWorker(threading.Thread):
         cleanup_lasers(self.sensors)
         self.sensors = [None] * SENSORS
 
-# ---------------------------
-# Main App
-# ---------------------------
+# ============================================================================
+# MAIN APPLICATION CLASS
+# ============================================================================
+# Network Survey Vehicle (NSV) Controller
+#
+# Main GUI application for road condition surveying with:
+# - 4 RTSP cameras (Front, Left, Right, Back)
+# - 13 laser distance sensors for rutting/IRI/texture measurement
+# - GPS tracking and chainage calculation
+# - Real-time data visualization and export
+#
+# Architecture:
+# - Multi-threaded: 4 camera threads + 1 sensor thread + main UI thread
+# - Event-driven UI updates via queues
+# - Distance-based binning (10m segments) with configurable measurement sections
+# ============================================================================
+
 class NSVApp(ctk.CTk):
+    """
+    Main application window for NSV road survey data collection system.
+
+    Manages the complete survey workflow:
+    1. Project setup (highway, lane, direction, chainage)
+    2. Sensor calibration and selection
+    3. Real-time data collection and display
+    4. Video recording with telemetry overlay
+    5. Excel export of road condition metrics
+
+    Key Features:
+    - Dual-resolution video: Preview (360x202@15fps) + Record (1280x720@25fps)
+    - Real-time graphs for selected sensors
+    - Distance-based binning with configurable measurement sections
+    - Automatic folder organization by project/lane/direction
+    """
     def __init__(self):
+        """Initialize the NSV Controller application and setup UI."""
         super().__init__()
         ctk.set_appearance_mode("dark")
         ctk.set_default_color_theme("blue")
@@ -520,8 +920,12 @@ class NSVApp(ctk.CTk):
         self.after(int(1000 / PREVIEW_FPS), self.poll_cam_frames)  # Match preview FPS
         self.after(60, self.poll_ui_queue)
 
-    # ---------- Menu ----------
+    # ========================================================================
+    # GUI CONSTRUCTION METHODS
+    # ========================================================================
+
     def build_menu(self):
+        """Build the application menu bar with File, Calibrate, and Help menus."""
         menubar = tk.Menu(self)
         file_menu = tk.Menu(menubar, tearoff=0)
         file_menu.add_command(label="New Project", command=self.new_project)
@@ -768,8 +1172,12 @@ class NSVApp(ctk.CTk):
         self.on_direction_select(new_dir)
         messagebox.showinfo("Direction Toggled", f"Direction changed to {new_dir}. Chainage will adjust accordingly.")
 
-    # ---------- Enable/Disable controls ----------
+    # ========================================================================
+    # UI STATE MANAGEMENT
+    # ========================================================================
+
     def set_controls_state(self, enabled: bool):
+        """Enable or disable control buttons (Start, Pause, Stop, etc.)."""
         state = "normal" if enabled else "disabled"
         for btn in [self.btn_start, self.btn_pause, self.btn_export, self.btn_stop, self.btn_reset, self.btn_toggle_dir]:
             btn.configure(state=state)
@@ -785,8 +1193,12 @@ class NSVApp(ctk.CTk):
             try: w.configure(state=state)
             except Exception: pass
 
-    # ---------- Cameras ----------
+    # ========================================================================
+    # CAMERA MANAGEMENT
+    # ========================================================================
+
     def start_camera(self, cam_id):
+        """Start camera worker thread for the specified camera ID."""
         if cam_id in self.cameras: return
         cw = CameraWorker(cam_id, self.cam_queue, self.get_writer_for, self.get_overlay_context)
         self.cameras[cam_id] = cw
@@ -841,8 +1253,17 @@ class NSVApp(ctk.CTk):
             'time': dt.strftime('%H:%M:%S'),
         }
 
-    # ---------- Project specs ----------
+    # ========================================================================
+    # PROJECT CONFIGURATION
+    # ========================================================================
+
     def set_project_specs(self):
+        """
+        Validate and save project specifications, create folder structure.
+
+        Collects all project parameters from UI, validates inputs, prompts for
+        base directory, and creates the folder hierarchy for data storage.
+        """
         get = lambda e: e.get().strip()
         survey = get(self.ent_survey)
         survey_location = get(self.ent_survey_location)
@@ -918,8 +1339,12 @@ class NSVApp(ctk.CTk):
         os.makedirs(self.stream_dir, exist_ok=True)
         os.makedirs(self.data_dir, exist_ok=True)
 
-    # ---------- Reset ----------
+    # ========================================================================
+    # CONTROL FLOW - START/PAUSE/STOP/RESET
+    # ========================================================================
+
     def on_reset(self):
+        """Reset the application to initial state (before project setup)."""
         self.on_stop(silent=True)
         self.project = None
         self.lbl_proj_status.configure(text="Project not configured.")
@@ -942,8 +1367,13 @@ class NSVApp(ctk.CTk):
         self.last_speed = 0.0
         self.last_distance_m = 0.0
 
-    # ---------- Controls ----------
     def on_start(self):
+        """
+        Start data collection run.
+
+        Initializes sensor worker thread, opens video writers, and begins
+        recording sensor data and video streams.
+        """
         if not self.controls_enabled or self.project is None:
             messagebox.showwarning("Start", "Set Project Specifications first.")
             return
@@ -985,7 +1415,22 @@ class NSVApp(ctk.CTk):
         self.set_selection_state(True)
         if not silent: messagebox.showinfo("Stopped", "Run stopped and data exported.")
 
+    # ========================================================================
+    # DATA EXPORT
+    # ========================================================================
+
     def on_export(self):
+        """
+        Export collected data to Excel files.
+
+        Creates 4 Excel files:
+        - Rutting data (left/right/average rut depths)
+        - IRI data (roughness index)
+        - Texture data (surface texture measurements)
+        - GPS data (coordinates, altitude, speed per 10m bin)
+
+        Handles partial bins (< 10m) at end of run.
+        """
         if not self.project or self.run_dir is None:
             messagebox.showinfo("Export", "No configured project/run to export.")
             return
@@ -1009,19 +1454,20 @@ class NSVApp(ctk.CTk):
             end_chain = start_chain + dir_sign * partial_km
             ts = now_local_str()
             self.table2_rows.append([ts, self.project["nh"], f"{start_chain:.3f}", f"{end_chain:.3f}", self.project["direction"], self.project["lane"], f"{start_lat:.6f}", f"{start_lon:.6f}", f"{alt:.1f}", f"{last_speed:.1f}"])
-            # For table1 (partial)
+            # Calculate metrics for partial bin (remaining distance < 10m)
             sel = np.array(self.get_sensor_selection(), dtype=bool)
             masked = np.array(avgs, dtype=float)
-            masked[~sel] = np.nan
-            S1,S2,S3,S4,S5,S6 = masked[:6]
-            # Use absolute values so metrics are never negative
-            left_rut   = np.nanmean(np.abs([S1, S2]))
-            right_rut  = np.nanmean(np.abs([S5, S6]))
-            avg_rut    = np.nanmean(np.abs([S1, S2, S5, S6]))
-            left_iri   = np.nanmean(np.abs([S3]))
-            right_iri  = np.nanmean(np.abs([S4]))
-            avg_iri    = np.nanmean(np.abs([S3, S4]))
-            avg_texture= np.nanmean(np.abs(masked))
+            masked[~sel] = np.nan  # Mask unselected sensors
+            S1,S2,S3,S4,S5,S6 = masked[:6]  # Extract first 6 sensors
+
+            # Calculate road condition metrics (see sensor mapping at top of file)
+            left_rut   = np.nanmean(np.abs([S1, S2]))  # Left wheel path rutting
+            right_rut  = np.nanmean(np.abs([S5, S6]))  # Right wheel path rutting
+            avg_rut    = np.nanmean(np.abs([S1, S2, S5, S6]))  # Average rutting
+            left_iri   = np.nanmean(np.abs([S3]))  # Left track roughness
+            right_iri  = np.nanmean(np.abs([S4]))  # Right track roughness
+            avg_iri    = np.nanmean(np.abs([S3, S4]))  # Average IRI
+            avg_texture= np.nanmean(np.abs(masked))  # Overall surface texture
             row1 = [
                 ts, self.project["nh"], f"{start_chain:.3f}", f"{end_chain:.3f}", self.project["direction"], self.project["lane"],
                 self._fmt_or_none(last_speed, 1),
@@ -1088,24 +1534,80 @@ class NSVApp(ctk.CTk):
             self.canvas_mpl.draw_idle()
 
     def on_ten_m_tick(self, avgs, speed_kmph, end_gps, start_gps):
-        if self.project is None or not self.running: return
+        """
+        Process completed 10-meter data bin.
+
+        Called when SensorWorker completes a 10m bin. Updates chainage,
+        captures images, accumulates data for measurement windows, and
+        flushes windows when measurement section is complete.
+
+        Args:
+            avgs: Average sensor values for the 10m bin
+            speed_kmph: Average speed during the bin
+            end_gps: (lat, lon, alt) at end of bin
+            start_gps: (lat, lon, alt) at start of bin
+        """
+        if self.project is None or not self.running:
+            return
+
+        # Determine direction sign for chainage calculation
+        # Increasing: chainage goes up (+1), Decreasing: chainage goes down (-1)
         dir_sign = 1 if self.project["direction"] == "Increasing" else -1
+
+        # Calculate chainage for this bin
         start_chain = self.current_chainage_km
-        end_chain = start_chain + dir_sign * BIN_SIZE_KM
+        end_chain = start_chain + dir_sign * BIN_SIZE_KM  # ±0.01 km (10m)
+
+        # Record timestamp and GPS data
         ts = now_local_str()
         lat, lon, alt = end_gps
         start_lat, start_lon, _ = start_gps
+
+        # Update telemetry state
         self.last_lat, self.last_lon, self.last_alt = lat, lon, alt
         self.last_speed = speed_kmph
         self.last_distance_m += BIN_SIZE_METERS
-        self.table2_rows.append([ts, self.project["nh"], f"{start_chain:.3f}", f"{end_chain:.3f}", self.project["direction"], self.project["lane"], f"{lat:.6f}", f"{lon:.6f}", f"{alt:.1f}", f"{speed_kmph:.1f}"])
-        self.capture_images(chainage_label=self.format_chainage_label(start_chain), lat=lat, lon=lon, alt=alt)
+
+        # Add GPS data row to Table 2 (GPS coordinates per 10m bin)
+        self.table2_rows.append([
+            ts, self.project["nh"], f"{start_chain:.3f}", f"{end_chain:.3f}",
+            self.project["direction"], self.project["lane"],
+            f"{lat:.6f}", f"{lon:.6f}", f"{alt:.1f}", f"{speed_kmph:.1f}"
+        ])
+
+        # Capture timestamped images from all selected cameras
+        self.capture_images(
+            chainage_label=self.format_chainage_label(start_chain),
+            lat=lat, lon=lon, alt=alt
+        )
+
+        # Accumulate bin data for measurement window averaging
         self.measure_accum_km += BIN_SIZE_KM
-        self.window_buffer.append({"S": avgs, "speed": speed_kmph, "lat": lat, "lon": lon, "start_lat": start_lat, "start_lon": start_lon})
-        if self.measure_accum_km + 1e-9 >= self.project["meas_km"]:
-            self.flush_measurement_window(final_ts=ts, end_lat=lat, end_lon=lon, dir_sign=dir_sign, end_chain=end_chain)
+        self.window_buffer.append({
+            "S": avgs,
+            "speed": speed_kmph,
+            "lat": lat,
+            "lon": lon,
+            "start_lat": start_lat,
+            "start_lon": start_lon
+        })
+
+        # Check if measurement window is complete
+        # (e.g., if measurement section = 1.0 km, flush after 100 bins of 10m each)
+        if self.measure_accum_km + 1e-9 >= self.project["meas_km"]:  # Add epsilon to avoid float precision issues
+            self.flush_measurement_window(
+                final_ts=ts,
+                end_lat=lat,
+                end_lon=lon,
+                dir_sign=dir_sign,
+                end_chain=end_chain
+            )
+
+        # Update current chainage position
         self.current_chainage_km = end_chain
         self.update_chainage_label(dir_sign * BIN_SIZE_KM)
+
+        # Update real-time graphs
         self.update_graphs(avgs)
 
     def get_sensor_selection(self):
@@ -1122,15 +1624,21 @@ class NSVApp(ctk.CTk):
         sel = np.array(self.get_sensor_selection(), dtype=bool)
         masked = np.array(mean_S, dtype=float)
         masked[~sel] = np.nan
-        S1,S2,S3,S4,S5,S6 = masked[:6]  # keep for 6, ignore others for metrics
-        # Use absolute values for rutting, IRI and texture (roughness) so output is non-negative
+        S1,S2,S3,S4,S5,S6 = masked[:6]  # Extract first 6 sensors, ignore S7-S13 for primary metrics
+
+        # Calculate road condition metrics using absolute values (non-negative output)
+        # Rutting: Deviation in wheel paths (S1, S2 = left; S5, S6 = right)
         left_rut   = np.nanmean(np.abs([S1, S2]))
         right_rut  = np.nanmean(np.abs([S5, S6]))
         avg_rut    = np.nanmean(np.abs([S1, S2, S5, S6]))
-        left_iri   = np.nanmean(np.abs([S2, S3]))
-        right_iri  = np.nanmean(np.abs([S4, S5]))
-        avg_iri    = np.nanmean(np.abs([S2, S3, S4, S5]))
-        avg_texture= np.nanmean(np.abs(masked))  # use absolute values across selected sensors
+
+        # IRI (International Roughness Index): Road roughness (S3 = left track; S4 = right track)
+        left_iri   = np.nanmean(np.abs([S3]))
+        right_iri  = np.nanmean(np.abs([S4]))
+        avg_iri    = np.nanmean(np.abs([S3, S4]))
+
+        # Texture: Overall road surface texture using all selected sensors
+        avg_texture= np.nanmean(np.abs(masked))
         speed_mean = float(np.nanmean([w["speed"] for w in self.window_buffer]))
         start_c = end_chain - dir_sign * self.measure_accum_km
         end_c   = start_c + dir_sign * self.measure_accum_km
@@ -1264,8 +1772,20 @@ class NSVApp(ctk.CTk):
         sign = '+' if offset >= 0 else '-'
         return f"{base:.0f}{sign}{abs(offset):.3f} Km"
 
-    # ---------- Calibration ----------
+    # ========================================================================
+    # SENSOR CALIBRATION
+    # ========================================================================
+
     def open_calibrate(self):
+        """
+        Open calibration dialog for sensor offset capture and selection.
+
+        Displays real-time sensor readings and allows:
+        - Viewing raw sensor values
+        - Capturing baseline offsets (zero calibration)
+        - Selecting which sensors to include in data export
+        - Viewing calibrated values (raw - offset)
+        """
         win = ctk.CTkToplevel(self)
         win.title("Calibrate and Select Sensors")
         win.geometry("800x500")

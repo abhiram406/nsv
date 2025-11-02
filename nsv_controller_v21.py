@@ -13,16 +13,16 @@ Version: 2.1
 Changelog v21:
 - Enhanced calibration window with connection status indicators
 - Visual sensor status (green=connected, red=disconnected)
-- COM port display for each sensor (shows detected ports)
+- COM port display for each sensor (shows initialized/detected ports)
 - Sensor connection checkboxes
 - Improved real-time sensor reading display
 - Added CalibrationReader thread for continuous sensor monitoring
-- **New: "Detect Sensors" button** - Automatically scans and detects connected sensors
-- **New: COM port auto-detection** - No need to manually configure COM ports
-- Added scan_com_ports() and detect_sensors() functions for hardware discovery
+- Sensors auto-initialize on app startup for immediate calibration access
+- **New: "Detect Sensors" button** - Re-scan and detect sensors manually
+- **New: COM port auto-detection** - scan_com_ports() and detect_sensors() functions
 - pyserial integration for COM port scanning (optional dependency)
-- Fixed: Calibration window now shows live readings before starting a run
-- Improved: Sensors only initialized when detected, reducing startup errors
+- Fixed: Calibration window shows live readings immediately
+- "Detect Sensors" button useful for troubleshooting or re-scanning after hardware changes
 """
 
 # ============================================================================
@@ -972,29 +972,43 @@ class CalibrationReader(threading.Thread):
     calibration window, even when the main data collection is not running.
 
     Features:
-    - Waits for sensors to be detected before reading
+    - Initializes sensors on startup
     - Reads all 13 sensors at ~10 Hz (lighter load than main worker)
     - Updates raw sensor values for calibration display
     - Runs independently of main SensorWorker
+    - Can re-detect and update sensors via detect button
     """
-    def __init__(self, raw_setter, port_map_getter):
+    def __init__(self, raw_setter):
         """
-        Initialize calibration reader thread.
+        Initialize calibration reader thread and sensors.
 
         Args:
             raw_setter (callable): Function to update latest raw sensor values
-            port_map_getter (callable): Function to get detected sensor port mapping
         """
         super().__init__(daemon=True)
         self.raw_setter = raw_setter
-        self.port_map_getter = port_map_getter
         self.stop_event = threading.Event()
-        self.sensors = [None] * SENSORS
+        self.sensors = None
         self.sensor_port_map = {}  # Maps sensor index to COM port
+
+        # Initialize sensors immediately for calibration
+        logger.info("Initializing sensors for calibration...")
+        self.sensors = initialize_lasers()
+
+        # Count successfully initialized sensors
+        connected_count = sum(1 for s in self.sensors if s is not None)
+        logger.info(f"Calibration reader: {connected_count}/{SENSORS} sensors initialized")
+
+        # Map sensors to their COM ports
+        for i, sensor in enumerate(self.sensors):
+            if sensor is not None and i < len(COM_PORTS):
+                self.sensor_port_map[i] = COM_PORTS[i]
 
     def update_sensors(self, detected_sensors_dict):
         """
         Update sensor instances from detection results.
+
+        Used when "Detect Sensors" button is clicked to re-scan and update.
 
         Args:
             detected_sensors_dict: Dict mapping sensor index to (port, sensor_instance)
@@ -1020,7 +1034,7 @@ class CalibrationReader(threading.Thread):
                 self.sensor_port_map[idx] = port
 
         connected_count = sum(1 for s in self.sensors if s is not None)
-        logger.info(f"CalibrationReader: {connected_count} sensor(s) active")
+        logger.info(f"CalibrationReader: {connected_count} sensor(s) active after detection")
 
     def run(self):
         """
@@ -2055,7 +2069,7 @@ class NSVApp(ctk.CTk):
         ).pack()
         ctk.CTkLabel(
             title_frame,
-            text="Green = Connected | Red = Disconnected | Check 'Connected' for sensors in use",
+            text="Sensors auto-initialized on startup | Use 'Detect Sensors' to re-scan | Green = Live readings",
             font=ctk.CTkFont(size=11),
             text_color="gray"
         ).pack()
@@ -2152,6 +2166,13 @@ class NSVApp(ctk.CTk):
             self.sensor_connected_vars.append(connected_var)
             self.sensor_connected_checkboxes.append(connected_chk)
 
+        # Initialize COM port labels from detected ports
+        for i in range(SENSORS):
+            if i in self.detected_ports:
+                self.cal_com_port_labels[i].configure(text=self.detected_ports[i])
+            else:
+                self.cal_com_port_labels[i].configure(text="--")
+
         # Update function for live readings
         def tick():
             for i in range(SENSORS):
@@ -2202,7 +2223,7 @@ class NSVApp(ctk.CTk):
                     self.cal_com_port_labels[i].configure(text="--")
 
             # Show results
-            detect_btn.configure(text=f"Detect Sensors ({count} found)", state="normal")
+            detect_btn.configure(text=f"Re-Scan Sensors ({count} found)", state="normal")
 
             if count > 0:
                 messagebox.showinfo(
@@ -2241,10 +2262,10 @@ class NSVApp(ctk.CTk):
             win.destroy()
             self.rebuild_graphs()
 
-        # Detect Sensors button (primary action)
+        # Re-Scan Sensors button
         detect_btn = ctk.CTkButton(
             button_frame,
-            text="Detect Sensors",
+            text="Re-Scan Sensors",
             command=detect_sensors_clicked,
             height=35,
             font=ctk.CTkFont(size=13, weight="bold"),
@@ -2280,19 +2301,21 @@ class NSVApp(ctk.CTk):
         """
         Start the calibration reader thread for live sensor readings.
 
-        This allows the calibration window to show live sensor data even
-        when the main data collection is not running.
+        This automatically initializes sensors and allows the calibration window
+        to show live sensor data even when the main data collection is not running.
         """
         if self.calibration_reader is not None:
             return  # Already running
 
         try:
-            # Create and start calibration reader
-            self.calibration_reader = CalibrationReader(
-                self.set_latest_raw,
-                lambda: self.detected_ports
-            )
+            # Create and start calibration reader (auto-initializes sensors)
+            self.calibration_reader = CalibrationReader(self.set_latest_raw)
             self.calibration_reader.start()
+
+            # Update detected ports from initialized sensors
+            if self.calibration_reader.sensor_port_map:
+                self.detected_ports = self.calibration_reader.sensor_port_map.copy()
+
             logger.info("Calibration reader started successfully")
         except Exception as e:
             logger.error(f"Failed to start calibration reader: {e}")

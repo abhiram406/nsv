@@ -1395,7 +1395,7 @@ class NSVApp(ctk.CTk):
             record_frame, time_diff = worker.get_frame_closest_to_time(target_time, max_age=0.5)
             
             if record_frame is None:
-                # No suitable frame found - use testcard
+                # No suitable frame found - use 10-
                 logger.warning(f"Camera {cam_id}: No synchronized frame available for {chainage_label}, using testcard")
                 
                 ctx = self.get_overlay_context()
@@ -1582,7 +1582,7 @@ class NSVApp(ctk.CTk):
 
 
     def format_chainage_label(self, chain_km):
-        return f"{chain_km:.2f}Km"
+        return f"{chain_km:.3f}Km"
 
 
     # ---------- Sensor Selection ----------

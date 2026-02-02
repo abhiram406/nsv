@@ -124,9 +124,17 @@ class MEDAQLib:
     """load MEDAQLib.dll from module path
 
     """
-
-    medaq_lib = WinDLL((str(os.getcwd() + "\MEDAQLib.dll")))
-    medaq_lib_cdecl = CDLL((str(os.getcwd() + "\MEDAQLib.dll")))
+    
+    # ============================================================
+    # FIXED: Get directory where THIS script is located
+    # This ensures DLL is found regardless of where program runs from
+    # ============================================================
+    _script_dir = os.path.dirname(os.path.abspath(__file__))
+    _dll_path = os.path.join(_script_dir, "MEDAQLib.dll")
+    
+    medaq_lib = WinDLL(_dll_path)
+    medaq_lib_cdecl = CDLL(_dll_path)
+    # ============================================================
 
     @staticmethod
     def CreateSensorInstance(Sensor):

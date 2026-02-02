@@ -6,6 +6,7 @@
 # line 585 changing speed format for dmi statistics popup
 # line 1038 , updating the texture for now we have both left and right texture and we take average in main export
 # line 1254 , updating the texture for now we have both left and right texture and we take average in flush measurement
+# converted all distances from m to km. Moved upto 2 decimal places
 
 
 import os, time, math, threading, queue
@@ -128,7 +129,7 @@ class NSVApp(ctk.CTk):
 
         self.last_lat = self.last_lon = self.last_alt = None
         self.last_speed = 0.0
-        self.last_distance_m = 0.0
+        self.last_distance_km = 0.0
         self.latest_raw = [float('nan')] * SENSORS
 
         self.camera_status = {cam_id: False for cam_id in CAM_IDS}
@@ -543,7 +544,7 @@ class NSVApp(ctk.CTk):
         if hasattr(self, 'dmi_encoder_tracker') and self.dmi_encoder_tracker:
             if self.dmi_encoder_tracker.is_connected():
                 stats = self.dmi_encoder_tracker.get_statistics()
-                distance_m = stats['total_distance_m']
+                distance_km = stats['total_distance_km']
                 speed_kmh = stats['current_speed_kmh']
                 pulse_updates = stats['pulse_updates']
                 direction = stats['direction']
@@ -556,12 +557,12 @@ class NSVApp(ctk.CTk):
                     # Show current status in text with direction
                     if speed_kmh > MIN_SPEED_THRESHOLD_KMH:
                         self.dmi_status_text.configure(
-                            text=f"{direction_text} ({distance_m:.1f}m, {int(round(speed_kmh))} km/h)"
+                            text=f"{direction_text} ({distance_km:.2f}Km, {int(round(speed_kmh))} Km/h)"
 
                         )
                     else:
                         self.dmi_status_text.configure(
-                            text=f"Stationary ({distance_m:.1f}m)"
+                            text=f"Stationary ({distance_km:.2f}Km)"
                         )
                 else:
                     # Connected but no data yet - yellow (waiting for first pulses)
@@ -580,7 +581,7 @@ class NSVApp(ctk.CTk):
         fix_info = self.gps_reader.get_fix_info()
 
         msg = "DMI Encoder Statistics\n\n"
-        msg += f"Total Distance: {stats['total_distance_m']:.1f} m\n"
+        msg += f"Total Distance: {stats['total_distance_km']:.2f} Km\n"
         msg += f"Total Pulses: {stats['total_pulses']}\n"
         msg += f"Current Speed: {int(round(stats['current_speed_kmh']))} km/h\n"
 
@@ -731,7 +732,7 @@ class NSVApp(ctk.CTk):
         lat = f"{self.last_lat:.6f}" if isinstance(self.last_lat, (int, float)) else "--"
         lon = f"{self.last_lon:.6f}" if isinstance(self.last_lon, (int, float)) else "--"
         alt = f"{self.last_alt:.1f}" if isinstance(self.last_alt, (int, float)) else "--"
-        dist = f"{self.last_distance_m:.1f}"
+        dist = f"{self.last_distance_km:.2f}"
         if self.project and self.current_chainage_km is not None:
             chain = format_absolute_chainage(
             p.get('init_chain'),
@@ -881,7 +882,7 @@ class NSVApp(ctk.CTk):
         self.set_left_state(True)
         self.last_lat = self.last_lon = self.last_alt = None
         self.last_speed = 0.0
-        self.last_distance_m = 0.0
+        self.last_distance_km = 0.0
         self.table1_rows.clear()
         self.table2_rows.clear()
         self.measure_accum_km = 0.0
@@ -971,7 +972,7 @@ class NSVApp(ctk.CTk):
         if not silent:
             stats = self.dmi_encoder_tracker.get_statistics()
             msg = "Data collection stopped.\n\n"
-            msg += f"DMI Distance: {stats['total_distance_m']:.1f} m\n"
+            msg += f"DMI Distance: {stats['total_distance_km']:.2f} Km\n"
             msg += f"Total Pulses: {stats['total_pulses']}\n"
             msg += f"Update Rate: {stats['update_rate_hz']:.1f} Hz\n\n"
             msg += "Use Export button to save data."
@@ -995,8 +996,8 @@ class NSVApp(ctk.CTk):
             lat, lon, alt = self.last_lat, self.last_lon, self.last_alt
             start_lat = self.sensor_worker.bin_start_lat
             start_lon = self.sensor_worker.bin_start_lon
-            current_distance_m = self.dmi_encoder_tracker.get_distance_m()
-            traveled_m = current_distance_m - (self.sensor_worker.next_five_m_edge - BIN_SIZE_METERS)
+            current_distance_km = self.dmi_encoder_tracker.get_distance_km()
+            traveled_m = current_distance_km - (self.sensor_worker.next_five_m_edge - BIN_SIZE_KM)
             partial_km = traveled_m / 1000
             dir_sign = 1 if self.project["direction"] == "Increasing" else -1
             start_chain = self.current_chainage_km
@@ -1018,7 +1019,7 @@ class NSVApp(ctk.CTk):
             right_iri = (((np.nanmean(np.abs([S4]))) / 630) ** (0.893)) * 100
 
             # RMS slope IRI for partial segment
-            segment_length_m = max(partial_km * 1000.0, BIN_SIZE_METERS)
+            #segment_length_m = max(partial_km * 1000.0, BIN_SIZE_METERS)
 
             #left_iri = self.rms_slope_iri([S3], segment_length_m)
             #right_iri = self.rms_slope_iri([S4], segment_length_m)
@@ -1113,7 +1114,7 @@ class NSVApp(ctk.CTk):
             msg = f"Data exported to:\n{self.data_dir}\n\n"
             msg += f"Rows T1: {len(df1)} | T2: {len(df2)}\n\n"
             msg += "DMI Encoder Statistics:\n"
-            msg += f"Total Distance: {stats['total_distance_m']:.1f} m\n"
+            msg += f"Total Distance: {stats['total_distance_km']:.2f} Km\n"
             msg += f"Total Pulses: {stats['total_pulses']}\n"
             msg += f"Update Rate: {stats['update_rate_hz']:.1f} Hz\n"
             msg += f"Connection: {'Active' if stats['connected'] else 'Disconnected'}"
@@ -1154,7 +1155,7 @@ class NSVApp(ctk.CTk):
         start_lat, start_lon, _ = start_gps
         self.last_lat, self.last_lon, self.last_alt = lat, lon, alt
         self.last_speed = speed_kmph
-        self.last_distance_m = self.dmi_encoder_tracker.get_distance_m()
+        self.last_distance_km = self.dmi_encoder_tracker.get_distance_km()
         self.table2_rows.append(
             [ts, self.project["nh"], f"{start_chain:.3f}", f"{end_chain:.3f}", self.project["direction"],
              self.project["lane"], f"{lat:.6f}", f"{lon:.6f}", f"{alt:.1f}", f"{speed_kmph:.1f}"])
@@ -1506,16 +1507,16 @@ class NSVApp(ctk.CTk):
         # CRITICAL: Read DMI distance/speed DIRECTLY (no queue) for ZERO lag
         # This matches the test script's direct serial read approach
         if self.running or self.project:
-            distance_m = self.dmi_encoder_tracker.get_distance_m()
+            distance_km = self.dmi_encoder_tracker.get_distance_km()
             speed_kmh = self.dmi_encoder_tracker.get_speed_kmh()
             
             # Update immediately - same as test script's print()
-            self.var_dist.set(f"{distance_m:.1f} m")
+            self.var_dist.set(f"{distance_km:.2f} Km")
             self.var_speed.set(f"{speed_kmh:.0f} km/h")
             self.speed_progress.set(min(speed_kmh / 100.0, 1.0))
             
             # Store for other uses
-            self.last_distance_m = distance_m
+            self.last_distance_km = distance_km
             self.last_speed = speed_kmh
 
         # Also update GPS display even when not running

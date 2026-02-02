@@ -7,6 +7,7 @@
     #increased header height
     #adjusted chainage units
     #retained old method until testing
+# converted all distances from m to km. Moved upto 2 decimal places
 
 import os, time, threading, queue
 from datetime import datetime
@@ -70,8 +71,8 @@ MAX_QUEUE_SIZE = 5  # ✅ Per camera queue size (total = 5 × 4 = 20 frames)
 
 # Constants for laser sensors
 SENSORS = 6
-LASER_COM_PORTS = [f"COM{i}" for i in [10, 6, 7, 9, 8, 11]]
-# LASER_COM_PORTS = [f"COM{i}" for i in [10,12,7,5,13,14]]
+#LASER_COM_PORTS = [f"COM{i}" for i in [10, 6, 7, 9, 8, 11]]
+LASER_COM_PORTS = [f"COM{i}" for i in [10,12,7,5,13,14]]
 EXPECTED_BLOCK_SIZE = 1000
 
 PLOT_MAX_POINTS = 10
@@ -81,9 +82,9 @@ GPS_COM_PORT = "COM30"
 GPS_BAUDRATE = 57600
 
 # DMI Encoder Configuration (for distance and speed measurement)
-DMI_COM_PORT = "COM13"          # ⚠️ CHANGE TO YOUR ARDUINO PORT
+DMI_COM_PORT = "COM4"          # ⚠️ CHANGE TO YOUR ARDUINO PORT
 DMI_BAUDRATE = 115200
-DMI_WHEEL_CIRCUMFERENCE_MM = 2245  # ⚠️ MEASURE YOUR WHEEL (roll test)
+DMI_WHEEL_CIRCUMFERENCE_MM = 2220  # ⚠️ MEASURE YOUR WHEEL (roll test)
 DMI_PULSES_PER_REV = 2500      # From encoder datasheet
 MIN_SPEED_THRESHOLD_KMH = 0.5  # Minimum speed to register movement
 
@@ -106,8 +107,8 @@ def format_absolute_chainage(init_chain_km, current_chain_km):
     Always return absolute chainage like: 102.000 Km
     """
     if init_chain_km is None or current_chain_km is None:
-        return "-- Km"
-    return f"{current_chain_km:.2f} Km"
+        return "--"
+    return f"{current_chain_km:.2f}"
 
 
 
@@ -725,7 +726,7 @@ class DMIEncoderTracker:
         self.mm_per_pulse = wheel_circumference_mm / self.total_pulses_per_rev
         
         self.serial = None
-        self.total_distance_m = 0.0
+        self.total_distance_km = 0.0
         self.total_pulses = 0
         self.last_pulse_count = 0
         self.last_timestamp_ms = 0
@@ -829,7 +830,7 @@ class DMIEncoderTracker:
                             if pulse_delta != 0:
                                 distance_delta_mm = pulse_delta * self.mm_per_pulse
                                 distance_delta_m = distance_delta_mm / 1000.0
-                                self.total_distance_m += distance_delta_m
+                                self.total_distance_km += distance_delta_m
                                 self.distance_updates += 1
                                 
                                 # Update direction
@@ -908,10 +909,10 @@ class DMIEncoderTracker:
         except Exception as e:
             logger.warning(f"DMI encoder update error: {e}")
 
-    def get_distance_m(self):
+    def get_distance_km(self):
         """Get total distance traveled in meters."""
         with self.lock:
-            return self.total_distance_m
+            return self.total_distance_km/1000
 
     def get_speed_kmh(self):
         """Get current speed in km/h."""
@@ -926,7 +927,7 @@ class DMIEncoderTracker:
     def reset(self):
         """Reset distance counter."""
         with self.lock:
-            self.total_distance_m = 0.0
+            self.total_distance_km = 0.0
             self.total_pulses = 0
             self.last_pulse_count = 0
             self.last_timestamp_ms = 0
@@ -963,7 +964,7 @@ class DMIEncoderTracker:
             direction_text = {-1: "Reverse", 0: "Stopped", 1: "Forward"}.get(self.direction, "Unknown")
             
             return {
-                'total_distance_m': self.total_distance_m,
+                'total_distance_km': self.total_distance_km,
                 'total_pulses': self.total_pulses,
                 'current_speed_kmh': self.speed_kmh,
                 'direction': self.direction,
@@ -1163,8 +1164,8 @@ class CameraWorker(threading.Thread):
                 testcard = self._make_testcard(f"{cam_name} DISCONNECTED")
                 ctx = self.get_overlay_ctx()
                 # Note: You'll need to import/define draw_header_to_size
-                # testcard_overlay = draw_header_to_size(testcard, ctx, self.record_size)
-                testcard_overlay = testcard  # Simplified for this example
+                testcard_overlay = draw_header_to_size(testcard, ctx, self.record_size)
+                #testcard_overlay = testcard  # Simplified for this example
                 
                 preview = cv2.resize(testcard_overlay, self.preview_size)
                 preview_rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
@@ -1221,8 +1222,8 @@ class CameraWorker(threading.Thread):
             ctx = self.get_overlay_ctx()
             preview = cv2.resize(frame, self.preview_size)
             # Note: Replace with your draw_header_to_size function
-            # record = draw_header_to_size(frame, ctx, self.record_size)
-            record = cv2.resize(frame, self.record_size)  # Simplified
+            record = draw_header_to_size(frame, ctx, self.record_size)
+            #record = cv2.resize(frame, self.record_size)  # Simplified
             preview_rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
             
             # Store frame in history for synchronized capture
@@ -1369,7 +1370,7 @@ class SensorWorker(threading.Thread):
         self.gps_reader = gps_reader
         self.dmi_encoder_tracker = dmi_encoder_tracker
         self.stop_event = threading.Event()
-        self.prev_distance_m = 0.0
+        self.prev_distance_km = 0.0
         self.bin_start_lat = None
         self.bin_start_lon = None
         self.last_valid_raw = [float('nan')] * SENSORS  # Store last valid readings
@@ -1385,11 +1386,11 @@ class SensorWorker(threading.Thread):
 
     def reset(self):
         self.last_t = time.time()
-        self.next_five_m_edge = 5.0
+        self.next_five_m_edge = 0.005
         self.bin_buffers = [[] for _ in range(SENSORS)]
         self.bin_start_lat = None
         self.bin_start_lon = None
-        self.prev_distance_m = 0.0
+        self.prev_distance_km = 0.0
 
     def run(self):
         logger.info("Sensor worker thread started")
@@ -1404,7 +1405,7 @@ class SensorWorker(threading.Thread):
             lat, lon, alt = self.gps_reader.get_position()
             
             # Get distance and speed from DMI encoder
-            current_distance_m = self.dmi_encoder_tracker.get_distance_m()
+            current_distance_km = self.dmi_encoder_tracker.get_distance_km()
             current_speed_kmh = self.dmi_encoder_tracker.get_speed_kmh()
 
             if lat is None or lon is None:
@@ -1450,7 +1451,7 @@ class SensorWorker(threading.Thread):
                 "lat": lat, "lon": lon, "alt": alt,
             })
 
-            if current_distance_m >= self.next_five_m_edge:
+            if current_distance_km >= self.next_five_m_edge:
                 # ✅ NEW: Record exact timestamp when boundary crossed
                 boundary_time = time.time()
                 
@@ -1468,7 +1469,7 @@ class SensorWorker(threading.Thread):
                 # ✅ NEW: Pass boundary_time to callback
                 self.ten_m_callback(avgs, current_speed_kmh, (lat, lon, alt), 
                                    (start_lat, start_lon, alt), boundary_time)
-                self.next_five_m_edge += 5.0
+                self.next_five_m_edge += 0.005
                 self.bin_start_lat = lat
                 self.bin_start_lon = lon
 

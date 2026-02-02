@@ -1,0 +1,92 @@
+[
+  {
+    "com_port": "COM32",
+    "vid": "0x0403",
+    "pid": "0x6001",
+    "serial_number": "FT74SCV5A",
+    "manufacturer": "FTDI",
+    "description": "USB Serial Port (COM32)",
+    "location": null
+  },
+  {
+    "com_port": "COM33",
+    "vid": "0x0403",
+    "pid": "0x6001",
+    "serial_number": "FT74SNDQA",
+    "manufacturer": "FTDI",
+    "description": "USB Serial Port (COM33)",
+    "location": null
+  },
+  {
+    "com_port": "COM3",
+    "vid": null,
+    "pid": null,
+    "serial_number": null,
+    "manufacturer": "Microsoft",
+    "description": "Standard Serial over Bluetooth link (COM3)",
+    "location": null
+  },
+  {
+    "com_port": "COM13",
+    "vid": "0x0403",
+    "pid": "0x6001",
+    "serial_number": "FT74SOUFA",
+    "manufacturer": "FTDI",
+    "description": "USB Serial Port (COM13)",
+    "location": null
+  },
+  {
+    "com_port": "COM34",
+    "vid": "0x0403",
+    "pid": "0x6001",
+    "serial_number": "FT74TJKAA",
+    "manufacturer": "FTDI",
+    "description": "USB Serial Port (COM34)",
+    "location": null
+  },
+  {
+    "com_port": "COM24",
+    "vid": null,
+    "pid": null,
+    "serial_number": null,
+    "manufacturer": "Microsoft",
+    "description": "Standard Serial over Bluetooth link (COM24)",
+    "location": null
+  },
+  {
+    "com_port": "COM31",
+    "vid": "0x0403",
+    "pid": "0x6001",
+    "serial_number": "FT74SNSKA",
+    "manufacturer": "FTDI",
+    "description": "USB Serial Port (COM31)",
+    "location": null
+  },
+  {
+    "com_port": "COM36",
+    "vid": "0x0403",
+    "pid": "0x6001",
+    "serial_number": "FT74SJBJA",
+    "manufacturer": "FTDI",
+    "description": "USB Serial Port (COM36)",
+    "location": null
+  },
+  {
+    "com_port": "COM30",
+    "vid": "0x3032",
+    "pid": "0x0013",
+    "serial_number": "8243A32BC8DFBCF1",
+    "manufacturer": "Microsoft",
+    "description": "USB Serial Device (COM30)",
+    "location": "1-1"
+  },
+  {
+    "com_port": "COM4",
+    "vid": "0x2341",
+    "pid": "0x0043",
+    "serial_number": "4343935353635151A091",
+    "manufacturer": "Microsoft",
+    "description": "USB Serial Device (COM4)",
+    "location": "1-1"
+  }
+]

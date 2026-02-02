@@ -1,0 +1,33 @@
+devices =  {gps: {
+			'vid': '0x3032', 'pid': '0x0013'}
+sensor1 - com33 'vid': '0x0403', 'pid': '0x6001'}
+
+sensor2 - com36 'vid': '0x0403', 'pid': '0x6001'
+sensor3 - com32 'vid': '0x0403', 'pid': '0x6001'
+sensor4 - com31
+sensor5 - com34
+}
+{
+  "lasers": {
+    "sequence": [
+      { "id": "S1", "serial": 'FT74SNDQA' },
+      { "id": "S2", "serial": 'FT74SJBJA' },
+      { "id": "S3", "serial": 'FT74SCV5A' },
+      { "id": "S4", "serial": 'FT74SNSKA' },
+      { "id": "S5", "serial": 'FT74TJKAA' },
+      { "id": "S6", "serial": 'FT74SOUFA' }
+    ]
+  },
+
+  "gps": {
+    "vid": "0x3032",
+    "pid": "0x0013",
+    "serial": "8243A32BC8DFBCF1"
+  },
+
+  "dmi": {
+    "vid": "0x0403",
+    "pid": "0x6001",
+    "serial": "4343935353635151A091"
+  }
+}

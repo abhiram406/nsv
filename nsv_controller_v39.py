@@ -9,8 +9,9 @@
 # converted all distances from m to km. Moved upto 2 decimal places
 
 
-import os, time, math, threading, queue
+import os, time, math, threading, queue,sys,json
 from datetime import datetime
+from serial.tools import list_ports
 
 import customtkinter as ctk
 import tkinter as tk
@@ -164,6 +165,11 @@ class NSVApp(ctk.CTk):
         # Start device status monitoring (runs continuously every 2 seconds)
         self.after(2000, self.update_all_device_status)
         logger.info("Device status monitoring started")
+    def get_base_dir():
+        if getattr(sys, 'frozen', False):
+            return os.path.dirname(sys.executable)
+        return os.getcwd()
+
 
     def update_initial_device_status(self):
         """Update device status indicators based on actual initialization."""
